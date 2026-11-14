@@ -74,6 +74,13 @@ public class BaseDetector extends Module {
         .defaultValue(3).min(0).sliderMax(30).build());
 
     private long lastToastMs = 0;
+    private int tickCounter = 0;
+    private int dbgScanned = 0;
+    private double dbgBest = 0;
+
+    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug").description("Print a scan summary in chat after each pass.")
+        .defaultValue(false).build());
 
     private final Setting<Boolean> hud = sgRender.add(new BoolSetting.Builder()
         .name("hud-message").description("Show the dig-down message on screen.")
@@ -140,6 +147,11 @@ public class BaseDetector extends Module {
 
     // ---------- lifecycle ----------
     @Override
+    public void onActivate() {
+        tickCounter = scanInterval.get(); // start a scan on the next tick
+    }
+
+    @Override
     public void onDeactivate() {
         bases.clear();
         queue.clear();
@@ -158,7 +170,9 @@ public class BaseDetector extends Module {
         if (overworldOnly.get() && mc.world.getRegistryKey() != World.OVERWORLD) return;
 
         // start a new pass every scan-interval ticks
-        if (mc.world.getTime() % scanInterval.get() == 0 && queue.isEmpty()) {
+        tickCounter++;
+        if (tickCounter >= scanInterval.get() && queue.isEmpty()) {
+            tickCounter = 0;
             ChunkPos c = mc.player.getChunkPos();
             int r = Math.min(scanRadius.get(), mc.options.getViewDistance().getValue());
             for (int dx = -r; dx <= r; dx++)
@@ -174,6 +188,13 @@ public class BaseDetector extends Module {
             ChunkPos p = queue.poll();
             WorldChunk chunk = mc.world.getChunkManager().getWorldChunk(p.x, p.z);
             if (chunk != null) scan(chunk);
+        }
+
+        if (debug.get() && queue.isEmpty() && dbgScanned > 0) {
+            info("Scanned " + dbgScanned + " chunks, best score " + Math.round(dbgBest * 10) / 10.0
+                + ", flagged " + bases.size());
+            dbgScanned = 0;
+            dbgBest = 0;
         }
     }
 
@@ -205,6 +226,9 @@ public class BaseDetector extends Module {
                         sz += (startZ + z) * w;
                     }
         }
+
+        dbgScanned++;
+        if (score > dbgBest) dbgBest = score;
 
         if (score >= minScore.get()) {
             BlockPos center = new BlockPos((int) (sx / score), (int) (sy / score), (int) (sz / score));
