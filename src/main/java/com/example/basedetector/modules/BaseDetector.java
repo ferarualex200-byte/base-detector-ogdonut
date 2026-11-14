@@ -15,11 +15,13 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.toast.SystemToast;
 import net.minecraft.registry.Registries;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
@@ -33,6 +35,7 @@ public class BaseDetector extends Module {
     // ---------- settings ----------
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgScan = settings.createGroup("Scanning");
+    private final SettingGroup sgAmethyst = settings.createGroup("Amethyst");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
     private final Setting<Double> minScore = sgGeneral.add(new DoubleSetting.Builder()
@@ -50,6 +53,10 @@ public class BaseDetector extends Module {
         .description("Blackstone and netherite are natural in the Nether, so skip other dimensions.")
         .defaultValue(true).build());
 
+    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug").description("Print a scan summary in chat after each pass.")
+        .defaultValue(false).build());
+
     private final Setting<Integer> scanRadius = sgScan.add(new IntSetting.Builder()
         .name("scan-radius-chunks")
         .description("How many chunks around you to scan.")
@@ -65,22 +72,70 @@ public class BaseDetector extends Module {
         .description("Lower this if you get lag spikes.")
         .defaultValue(4).min(1).sliderMax(20).build());
 
+    // ----- amethyst -----
+    private final Setting<Boolean> useAmethyst = sgAmethyst.add(new BoolSetting.Builder()
+        .name("use-amethyst")
+        .description("Use budding amethyst growth to tell how long a chunk has been loaded.")
+        .defaultValue(true).build());
+
+    private final Setting<Integer> amethystMaxY = sgAmethyst.add(new IntSetting.Builder()
+        .name("amethyst-max-y")
+        .description("Only look for budding amethyst at or below this Y (geodes are mostly below 70).")
+        .defaultValue(70).range(-64, 320).sliderRange(-64, 128).build());
+
+    private final Setting<Integer> minFaces = sgAmethyst.add(new IntSetting.Builder()
+        .name("min-growth-faces")
+        .description("Minimum number of budding faces in a chunk before its growth is trusted.")
+        .defaultValue(6).min(1).sliderMax(60).build());
+
+    private final Setting<Double> fullGrowth = sgAmethyst.add(new DoubleSetting.Builder()
+        .name("full-growth")
+        .description("Average growth (0-4) that counts as long-loaded.")
+        .defaultValue(3.0).min(0.5).max(4).sliderMax(4).build());
+
+    private final Setting<Double> midGrowth = sgAmethyst.add(new DoubleSetting.Builder()
+        .name("mid-growth")
+        .description("Average growth (0-4) that counts as medium-loaded.")
+        .defaultValue(2.0).min(0.5).max(4).sliderMax(4).build());
+
+    private final Setting<Double> fullBonus = sgAmethyst.add(new DoubleSetting.Builder()
+        .name("full-growth-bonus")
+        .description("Score added to a chunk that has suspicious blocks AND long-loaded amethyst.")
+        .defaultValue(5).min(0).sliderMax(20).build());
+
+    private final Setting<Double> midBonus = sgAmethyst.add(new DoubleSetting.Builder()
+        .name("mid-growth-bonus")
+        .description("Score added for medium-loaded amethyst.")
+        .defaultValue(2).min(0).sliderMax(20).build());
+
+    private final Setting<Double> neighborBonus = sgAmethyst.add(new DoubleSetting.Builder()
+        .name("neighbor-bonus")
+        .description("Score added per neighboring chunk that also has long-loaded amethyst.")
+        .defaultValue(1).min(0).sliderMax(10).build());
+
+    private final Setting<Boolean> guessPlaces = sgAmethyst.add(new BoolSetting.Builder()
+        .name("guess-places")
+        .description("Also flag chunks with long-loaded amethyst but no suspicious blocks as possible bases.")
+        .defaultValue(true).build());
+
+    private final Setting<Double> guessGrowth = sgAmethyst.add(new DoubleSetting.Builder()
+        .name("guess-growth")
+        .description("Average growth (0-4) a chunk needs to be flagged as a guess.")
+        .defaultValue(3.2).min(0.5).max(4).sliderMax(4).build());
+
+    private final Setting<Integer> ignoreNearOrigin = sgAmethyst.add(new IntSetting.Builder()
+        .name("ignore-near-origin")
+        .description("Ignore guesses closer than this many blocks to 0,0 (spawn chunks stay loaded).")
+        .defaultValue(1000).min(0).sliderMax(10000).build());
+
+    // ----- render -----
     private final Setting<Boolean> toast = sgRender.add(new BoolSetting.Builder()
-        .name("toast").description("Show a BASE FOUND toast when a new base is detected.")
+        .name("toast").description("Show a toast when a new base or possible base is detected.")
         .defaultValue(true).build());
 
     private final Setting<Integer> toastCooldown = sgRender.add(new IntSetting.Builder()
         .name("toast-cooldown-seconds").description("Minimum time between toasts.")
         .defaultValue(3).min(0).sliderMax(30).build());
-
-    private long lastToastMs = 0;
-    private int tickCounter = 0;
-    private int dbgScanned = 0;
-    private double dbgBest = 0;
-
-    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
-        .name("debug").description("Print a scan summary in chat after each pass.")
-        .defaultValue(false).build());
 
     private final Setting<Boolean> hud = sgRender.add(new BoolSetting.Builder()
         .name("hud-message").description("Show the dig-down message on screen.")
@@ -95,8 +150,12 @@ public class BaseDetector extends Module {
         .defaultValue(true).build());
 
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder()
-        .name("color").description("Color of the column and tracer.")
+        .name("color").description("Color of the column and tracer for detected bases.")
         .defaultValue(new SettingColor(0, 0, 0, 255)).build());
+
+    private final Setting<SettingColor> guessColor = sgRender.add(new ColorSetting.Builder()
+        .name("guess-color").description("Color of the column and tracer for amethyst guesses.")
+        .defaultValue(new SettingColor(255, 140, 0, 255)).build());
 
     private final Setting<Integer> outlineAlpha = sgRender.add(new IntSetting.Builder()
         .name("outline-alpha").description("Opacity of the outline (0-255).")
@@ -111,11 +170,20 @@ public class BaseDetector extends Module {
         .defaultValue(new SettingColor(255, 80, 80, 255)).build());
 
     // ---------- data ----------
-    private record Base(BlockPos pos, double score) {}
+    /** guess = true means flagged only because of amethyst growth (no suspicious blocks). */
+    private record Base(BlockPos pos, double score, double growth, boolean guess) {}
+
+    private record Amethyst(double growth, int faces, BlockPos center) {}
 
     private final Map<ChunkPos, Base> bases = new ConcurrentHashMap<>();
+    private final Map<ChunkPos, Double> growthCache = new ConcurrentHashMap<>();
     private final Map<Block, Double> weights = new HashMap<>();
     private final ArrayDeque<ChunkPos> queue = new ArrayDeque<>();
+
+    private long lastToastMs = 0;
+    private int tickCounter = 0;
+    private int dbgScanned = 0;
+    private double dbgBest = 0;
 
     private static final String[] DECOR = {
         "banner", "lantern", "candle", "flower_pot", "end_rod", "beacon", "enchanting_table"
@@ -123,7 +191,7 @@ public class BaseDetector extends Module {
 
     public BaseDetector() {
         super(BaseDetectorAddon.CATEGORY, "base-detector",
-            "Scores chunks by suspicious blocks and shows where to dig down.");
+            "Scores chunks by suspicious blocks and amethyst growth, and shows where to dig down.");
     }
 
     // ---------- block weights (edit these to taste) ----------
@@ -145,6 +213,15 @@ public class BaseDetector extends Module {
         return weights.computeIfAbsent(state.getBlock(), BaseDetector::computeWeight);
     }
 
+    /** 0 = nothing, 1 = small bud, 2 = medium, 3 = large, 4 = full cluster. */
+    private static int stage(BlockState s) {
+        if (s.isOf(Blocks.SMALL_AMETHYST_BUD)) return 1;
+        if (s.isOf(Blocks.MEDIUM_AMETHYST_BUD)) return 2;
+        if (s.isOf(Blocks.LARGE_AMETHYST_BUD)) return 3;
+        if (s.isOf(Blocks.AMETHYST_CLUSTER)) return 4;
+        return 0;
+    }
+
     // ---------- lifecycle ----------
     @Override
     public void onActivate() {
@@ -153,13 +230,17 @@ public class BaseDetector extends Module {
 
     @Override
     public void onDeactivate() {
-        bases.clear();
-        queue.clear();
+        clearAll();
     }
 
     @EventHandler
     private void onGameLeft(GameLeftEvent event) {
+        clearAll();
+    }
+
+    private void clearAll() {
         bases.clear();
+        growthCache.clear();
         queue.clear();
     }
 
@@ -179,8 +260,9 @@ public class BaseDetector extends Module {
                 for (int dz = -r; dz <= r; dz++)
                     queue.add(new ChunkPos(c.x + dx, c.z + dz));
 
-            // forget bases in chunks that are no longer loaded
+            // forget data for chunks that are no longer loaded
             bases.keySet().removeIf(p -> mc.world.getChunkManager().getWorldChunk(p.x, p.z) == null);
+            growthCache.keySet().removeIf(p -> mc.world.getChunkManager().getWorldChunk(p.x, p.z) == null);
         }
 
         // process a few chunks per tick so we never lag
@@ -191,18 +273,22 @@ public class BaseDetector extends Module {
         }
 
         if (debug.get() && queue.isEmpty() && dbgScanned > 0) {
+            long guesses = bases.values().stream().filter(Base::guess).count();
             info("Scanned " + dbgScanned + " chunks, best score " + Math.round(dbgBest * 10) / 10.0
-                + ", flagged " + bases.size());
+                + ", flagged " + (bases.size() - guesses) + ", guesses " + guesses);
             dbgScanned = 0;
             dbgBest = 0;
         }
     }
 
     private void scan(WorldChunk chunk) {
+        ChunkPos cp = chunk.getPos();
+
+        // ----- 1) suspicious blocks -----
         ChunkSection[] sections = chunk.getSectionArray();
         int bottom = chunk.getBottomY();
-        int startX = chunk.getPos().getStartX();
-        int startZ = chunk.getPos().getStartZ();
+        int startX = cp.getStartX();
+        int startZ = cp.getStartZ();
         int limit = maxY.get();
 
         double score = 0, sx = 0, sy = 0, sz = 0;
@@ -227,27 +313,122 @@ public class BaseDetector extends Module {
                     }
         }
 
-        dbgScanned++;
-        if (score > dbgBest) dbgBest = score;
+        // ----- 2) amethyst growth -----
+        double growth = -1;
+        BlockPos geode = null;
+        if (useAmethyst.get()) {
+            Amethyst a = scanAmethyst(chunk);
+            if (a != null && a.faces() >= minFaces.get()) {
+                growth = a.growth();
+                geode = a.center();
+                growthCache.put(cp, growth);
+            } else {
+                growthCache.remove(cp);
+            }
+        }
 
-        if (score >= minScore.get()) {
+        // ----- 3) combine -----
+        double total = score;
+        if (score > 0 && growth >= 0) {
+            if (growth >= fullGrowth.get()) total += fullBonus.get();
+            else if (growth >= midGrowth.get()) total += midBonus.get();
+            total += neighborBonus.get() * grownNeighbors(cp);
+        }
+
+        dbgScanned++;
+        if (total > dbgBest) dbgBest = total;
+
+        Base found = null;
+        if (score > 0 && total >= minScore.get()) {
+            // confirmed: suspicious blocks (helped along by amethyst growth)
             BlockPos center = new BlockPos((int) (sx / score), (int) (sy / score), (int) (sz / score));
-            boolean isNew = !bases.containsKey(chunk.getPos());
-            bases.put(chunk.getPos(), new Base(center, score));
-            if (isNew) notifyFound(center);
+            found = new Base(center, total, growth, false);
+        } else if (guessPlaces.get() && geode != null && growth >= guessGrowth.get()
+            && Math.hypot(geode.getX(), geode.getZ()) >= ignoreNearOrigin.get()) {
+            // guess: long-loaded chunk with a geode, but no suspicious blocks found
+            found = new Base(geode, growth, growth, true);
+        }
+
+        if (found != null) {
+            Base old = bases.get(cp);
+            boolean isNew = old == null || old.guess() != found.guess();
+            bases.put(cp, found);
+            if (isNew) notifyFound(found);
         } else {
-            bases.remove(chunk.getPos());
+            bases.remove(cp);
         }
     }
 
-    private void notifyFound(BlockPos pos) {
+    /** Average growth (0..4) of all budding amethyst faces in this chunk, or null if it has none. */
+    private Amethyst scanAmethyst(WorldChunk chunk) {
+        ChunkSection[] sections = chunk.getSectionArray();
+        int bottom = chunk.getBottomY();
+        int startX = chunk.getPos().getStartX();
+        int startZ = chunk.getPos().getStartZ();
+        int limit = amethystMaxY.get();
+
+        int faces = 0, totalStage = 0, count = 0;
+        long bx = 0, by = 0, bz = 0;
+        BlockPos.Mutable p = new BlockPos.Mutable();
+
+        for (int i = 0; i < sections.length; i++) {
+            int baseY = bottom + i * 16;
+            if (baseY > limit) continue;
+
+            ChunkSection s = sections[i];
+            if (s == null || s.isEmpty() || !s.hasAny(st -> st.isOf(Blocks.BUDDING_AMETHYST))) continue;
+
+            for (int y = 0; y < 16; y++)
+                for (int z = 0; z < 16; z++)
+                    for (int x = 0; x < 16; x++) {
+                        if (!s.getBlockState(x, y, z).isOf(Blocks.BUDDING_AMETHYST)) continue;
+
+                        int wx = startX + x;
+                        int wy = baseY + y;
+                        int wz = startZ + z;
+                        count++;
+                        bx += wx;
+                        by += wy;
+                        bz += wz;
+
+                        for (Direction d : Direction.values()) {
+                            p.set(wx, wy, wz).move(d);
+                            BlockState n = mc.world.getBlockState(p);
+                            int st = stage(n);
+                            // only count faces where a bud could grow (air/water) or already has
+                            if (st > 0 || n.isAir() || n.isOf(Blocks.WATER)) {
+                                faces++;
+                                totalStage += st;
+                            }
+                        }
+                    }
+        }
+
+        if (count == 0 || faces == 0) return null;
+        BlockPos center = new BlockPos((int) (bx / count), (int) (by / count), (int) (bz / count));
+        return new Amethyst((double) totalStage / faces, faces, center);
+    }
+
+    private int grownNeighbors(ChunkPos cp) {
+        int n = 0;
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                Double g = growthCache.get(new ChunkPos(cp.x + dx, cp.z + dz));
+                if (g != null && g >= fullGrowth.get()) n++;
+            }
+        return n;
+    }
+
+    private void notifyFound(Base b) {
         if (!toast.get()) return;
         long now = System.currentTimeMillis();
         if (now - lastToastMs < toastCooldown.get() * 1000L) return;
         lastToastMs = now;
 
+        BlockPos pos = b.pos();
         SystemToast.add(mc.getToastManager(), SystemToast.Type.PERIODIC_NOTIFICATION,
-            Text.literal("BASE FOUND"),
+            Text.literal(b.guess() ? "POSSIBLE BASE" : "BASE FOUND"),
             Text.literal("X " + pos.getX() + "  Y " + pos.getY() + "  Z " + pos.getZ()));
     }
 
@@ -273,8 +454,12 @@ public class BaseDetector extends Module {
         double top = mc.world.getBottomY() + mc.world.getHeight();
 
         SettingColor c = color.get();
-        Color line = new Color(c.r, c.g, c.b, outlineAlpha.get());
-        Color fill = new Color(c.r, c.g, c.b, fillAlpha.get());
+        Color baseLine = new Color(c.r, c.g, c.b, outlineAlpha.get());
+        Color baseFill = new Color(c.r, c.g, c.b, fillAlpha.get());
+
+        SettingColor g = guessColor.get();
+        Color guessLine = new Color(g.r, g.g, g.b, outlineAlpha.get());
+        Color guessFill = new Color(g.r, g.g, g.b, fillAlpha.get());
 
         if (esp.get()) {
             for (Base b : bases.values()) {
@@ -282,7 +467,9 @@ public class BaseDetector extends Module {
                 event.renderer.box(
                     p.getX(), p.getY(), p.getZ(),
                     p.getX() + 1, top, p.getZ() + 1,
-                    fill, line, ShapeMode.Both, 0);
+                    b.guess() ? guessFill : baseFill,
+                    b.guess() ? guessLine : baseLine,
+                    ShapeMode.Both, 0);
             }
         }
 
@@ -290,7 +477,8 @@ public class BaseDetector extends Module {
         if (tracer.get() && n != null) {
             event.renderer.line(
                 RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z,
-                n.pos().getX() + 0.5, n.pos().getY() + 0.5, n.pos().getZ() + 0.5, line);
+                n.pos().getX() + 0.5, n.pos().getY() + 0.5, n.pos().getZ() + 0.5,
+                n.guess() ? guessLine : baseLine);
         }
     }
 
@@ -307,9 +495,13 @@ public class BaseDetector extends Module {
         int horiz = (int) Math.sqrt(dx * dx + dz * dz);
         int dy = me.getY() - t.getY();
 
+        String label = n.guess()
+            ? "POSSIBLE BASE (amethyst " + Math.round(n.growth() * 10) / 10.0 + ")"
+            : "SUS BASE (score " + (int) n.score() + ")";
+
         String msg;
         if (horiz > 6) {
-            msg = "SUS BASE (score " + (int) n.score() + "): X " + t.getX() + " Z " + t.getZ()
+            msg = label + ": X " + t.getX() + " Z " + t.getZ()
                 + " (" + horiz + "m), then dig down to Y " + t.getY();
         } else if (dy > 3) {
             msg = "DIG DOWN " + dy + " blocks to Y " + t.getY();
