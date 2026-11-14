@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "addon-template",
+  "id": "base-detector",
   "version": "${version}",
-  "name": "Addon Template",
+  "name": "Base Detector",
   "description": "An addon template for Meteor Client addons.",
   "authors": [
     "seasnail"
@@ -14,7 +14,7 @@
   "environment": "client",
   "entrypoints": {
     "meteor": [
-      "com.example.addon.AddonTemplate"
+      "com.example.basedetector.BaseDetectorAddon"
     ]
   },
   "mixins": [
