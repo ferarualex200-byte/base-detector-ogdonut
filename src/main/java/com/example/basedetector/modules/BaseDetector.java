@@ -22,14 +22,19 @@ import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 public class BaseDetector extends Module {
     // ---------- settings ----------
@@ -58,15 +63,20 @@ public class BaseDetector extends Module {
         .description("How many chunks around you to scan.")
         .defaultValue(8).min(1).sliderMax(32).build());
 
-    private final Setting<Integer> scanInterval = sgScan.add(new IntSetting.Builder()
-        .name("scan-interval-ticks")
-        .description("How often to start a new scan pass.")
-        .defaultValue(100).min(20).sliderMax(400).build());
+    private final Setting<Integer> scanBudgetMs = sgScan.add(new IntSetting.Builder()
+        .name("scan-budget-ms")
+        .description("Max milliseconds per tick spent scanning. Higher = flags appear sooner, lower = less lag.")
+        .defaultValue(4).min(1).sliderMax(25).build());
 
-    private final Setting<Integer> chunksPerTick = sgScan.add(new IntSetting.Builder()
-        .name("chunks-per-tick")
-        .description("Lower this if you get lag spikes.")
-        .defaultValue(4).min(1).sliderMax(20).build());
+    private final Setting<Integer> rescanSeconds = sgScan.add(new IntSetting.Builder()
+        .name("rescan-seconds")
+        .description("How long before an already scanned chunk is scanned again.")
+        .defaultValue(30).min(2).sliderMax(300).build());
+
+    private final Setting<Boolean> skipBehind = sgScan.add(new BoolSetting.Builder()
+        .name("skip-behind")
+        .description("While flying fast, only scan chunks ahead of you and to the sides, never behind you.")
+        .defaultValue(true).build());
 
     // ----- amethyst -----
     private final Setting<Boolean> useAmethyst = sgAmethyst.add(new BoolSetting.Builder()
@@ -181,8 +191,19 @@ public class BaseDetector extends Module {
     private final Map<Block, Double> weights = new HashMap<>();
     private final ArrayDeque<ChunkPos> queue = new ArrayDeque<>();
 
+    private record Scanned(WorldChunk chunk, int tick) {}
+    private record Cand(ChunkPos pos, double key) {}
+
+    private final Map<ChunkPos, Scanned> scanned = new HashMap<>();
+
+    private static final int REFRESH_TICKS = 4;
+    private static final double FAST_SPEED = 0.4; // blocks/tick (horizontal) that counts as "flying"
+
     private long lastToastMs = 0;
-    private int tickCounter = 0;
+    private int nowTick = 0;
+    private int refreshTimer = 0;
+    private boolean moving = false;
+    private double dirX = 0, dirZ = 0;
 
     private static final String[] DECOR = {
         "banner", "lantern", "candle", "flower_pot", "end_rod", "beacon", "enchanting_table"
@@ -224,7 +245,7 @@ public class BaseDetector extends Module {
     // ---------- lifecycle ----------
     @Override
     public void onActivate() {
-        tickCounter = scanInterval.get(); // start a scan on the next tick
+        refreshTimer = REFRESH_TICKS; // queue chunks on the next tick
     }
 
     @Override
@@ -240,7 +261,9 @@ public class BaseDetector extends Module {
     private void clearAll() {
         bases.clear();
         growthCache.clear();
+        scanned.clear();
         queue.clear();
+        moving = false;
     }
 
     // ---------- scanning ----------
@@ -249,27 +272,95 @@ public class BaseDetector extends Module {
         if (mc.world == null || mc.player == null) return;
         if (overworldOnly.get() && mc.world.getRegistryKey() != World.OVERWORLD) return;
 
-        // start a new pass every scan-interval ticks
-        tickCounter++;
-        if (tickCounter >= scanInterval.get() && queue.isEmpty()) {
-            tickCounter = 0;
-            ChunkPos c = mc.player.getChunkPos();
-            int r = Math.min(scanRadius.get(), mc.options.getViewDistance().getValue());
-            for (int dx = -r; dx <= r; dx++)
-                for (int dz = -r; dz <= r; dz++)
-                    queue.add(new ChunkPos(c.x + dx, c.z + dz));
+        nowTick++;
+        updateDirection();
 
-            // forget data for chunks that are no longer loaded
-            bases.keySet().removeIf(p -> mc.world.getChunkManager().getWorldChunk(p.x, p.z) == null);
-            growthCache.keySet().removeIf(p -> mc.world.getChunkManager().getWorldChunk(p.x, p.z) == null);
+        // keep the queue fresh: newly loaded chunks (usually ahead of you) are picked up within a few ticks
+        if (++refreshTimer >= REFRESH_TICKS) {
+            refreshTimer = 0;
+            refreshQueue();
         }
+        if (nowTick % 20 == 0) forgetUnloaded();
 
-        // process a few chunks per tick so we never lag
-        for (int i = 0; i < chunksPerTick.get() && !queue.isEmpty(); i++) {
+        // scan by time, not by chunk count: use up to scan-budget-ms every tick (always at least one chunk)
+        long deadline = System.nanoTime() + scanBudgetMs.get() * 1_000_000L;
+        boolean first = true;
+        while (!queue.isEmpty() && (first || System.nanoTime() < deadline)) {
+            first = false;
             ChunkPos p = queue.poll();
             WorldChunk chunk = mc.world.getChunkManager().getWorldChunk(p.x, p.z);
-            if (chunk != null) scan(chunk);
+            if (chunk == null) continue;
+            scanned.put(p, new Scanned(chunk, nowTick));
+            scan(chunk);
         }
+    }
+
+    private void updateDirection() {
+        Vec3d v = mc.player.getVelocity();
+        double h = Math.hypot(v.x, v.z);
+        if (h >= FAST_SPEED) {
+            dirX = v.x / h;
+            dirZ = v.z / h;
+            moving = true;
+        } else {
+            moving = false;
+        }
+    }
+
+    /** Queue every loaded chunk that is new or due for a rescan, ahead-of-you chunks first. */
+    private void refreshQueue() {
+        queue.clear();
+        ChunkPos c = mc.player.getChunkPos();
+        int r = Math.min(scanRadius.get(), mc.options.getViewDistance().getValue());
+        double px = mc.player.getX(), pz = mc.player.getZ();
+        int rescanTicks = rescanSeconds.get() * 20;
+        boolean skip = moving && skipBehind.get();
+
+        List<Cand> todo = new ArrayList<>();
+        for (int dx = -r; dx <= r; dx++)
+            for (int dz = -r; dz <= r; dz++) {
+                ChunkPos p = new ChunkPos(c.x + dx, c.z + dz);
+                WorldChunk chunk = mc.world.getChunkManager().getWorldChunk(p.x, p.z);
+                if (chunk == null) continue;
+
+                Scanned s = scanned.get(p);
+                boolean fresh = s == null || s.chunk() != chunk;
+                if (!fresh && nowTick - s.tick() < rescanTicks) continue;
+
+                double vx = p.getStartX() + 8 - px;
+                double vz = p.getStartZ() + 8 - pz;
+                double key = vx * vx + vz * vz;
+                if (moving) {
+                    double along = vx * dirX + vz * dirZ;
+                    double lateral = vx * dirZ - vz * dirX;
+                    if (along < -16) {
+                        if (skip) continue;
+                        key += 1e7; // behind you: last
+                    }
+                    key += 3 * lateral * lateral; // chunks on your flight line first
+                }
+                if (!fresh) key += 5e6; // rescans after brand-new chunks
+                todo.add(new Cand(p, key));
+            }
+
+        todo.sort(Comparator.comparingDouble(Cand::key));
+        for (Cand cd : todo) queue.add(cd.pos());
+    }
+
+    private void forgetUnloaded() {
+        Predicate<ChunkPos> gone = p -> mc.world.getChunkManager().getWorldChunk(p.x, p.z) == null;
+        bases.keySet().removeIf(gone);
+        growthCache.keySet().removeIf(gone);
+        scanned.keySet().removeIf(gone);
+    }
+
+    /** A chunk just turned out to be long-loaded: its neighbors' scores depend on that, so rescan them soon. */
+    private void invalidateNeighbors(ChunkPos cp) {
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                scanned.remove(new ChunkPos(cp.x + dx, cp.z + dz));
+            }
     }
 
     private void scan(WorldChunk chunk) {
@@ -312,7 +403,8 @@ public class BaseDetector extends Module {
             if (a != null && a.faces() >= minFaces.get()) {
                 growth = a.growth();
                 geode = a.center();
-                growthCache.put(cp, growth);
+                Double old = growthCache.put(cp, growth);
+                if (growth >= fullGrowth.get() && (old == null || old < fullGrowth.get())) invalidateNeighbors(cp);
             } else {
                 growthCache.remove(cp);
             }
@@ -432,19 +524,27 @@ public class BaseDetector extends Module {
             b.pos().getZ() + (int) Math.round(Math.sin(ang) * off));
     }
 
+    /** Nearest base. While flying fast, bases ahead of you win over closer ones behind you. */
     private Base nearest() {
         if (mc.player == null) return null;
         BlockPos me = mc.player.getBlockPos();
-        Base best = null;
-        double bestD = Double.MAX_VALUE;
+        Base best = null, bestAhead = null;
+        double bestD = Double.MAX_VALUE, bestAheadD = Double.MAX_VALUE;
         for (Base b : bases.values()) {
             double d = b.pos().getSquaredDistance(me);
             if (d < bestD) {
                 bestD = d;
                 best = b;
             }
+            if (moving) {
+                double along = (b.pos().getX() - me.getX()) * dirX + (b.pos().getZ() - me.getZ()) * dirZ;
+                if (along >= 0 && d < bestAheadD) {
+                    bestAheadD = d;
+                    bestAhead = b;
+                }
+            }
         }
-        return best;
+        return bestAhead != null ? bestAhead : best;
     }
 
     // ---------- rendering ----------
