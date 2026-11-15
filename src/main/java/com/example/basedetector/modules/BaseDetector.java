@@ -53,10 +53,6 @@ public class BaseDetector extends Module {
         .description("Blackstone and netherite are natural in the Nether, so skip other dimensions.")
         .defaultValue(true).build());
 
-    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
-        .name("debug").description("Print a scan summary in chat after each pass.")
-        .defaultValue(false).build());
-
     private final Setting<Integer> scanRadius = sgScan.add(new IntSetting.Builder()
         .name("scan-radius-chunks")
         .description("How many chunks around you to scan.")
@@ -150,12 +146,17 @@ public class BaseDetector extends Module {
         .defaultValue(true).build());
 
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder()
-        .name("color").description("Color of the column and tracer for detected bases.")
-        .defaultValue(new SettingColor(0, 0, 0, 255)).build());
+        .name("base-beam-color").description("Color of the beam (and tracer) for blocks-based finds.")
+        .defaultValue(new SettingColor(255, 40, 40, 255)).build());
 
     private final Setting<SettingColor> guessColor = sgRender.add(new ColorSetting.Builder()
-        .name("guess-color").description("Color of the column and tracer for amethyst guesses.")
+        .name("guess-beam-color").description("Color of the beam (and tracer) for amethyst guesses.")
         .defaultValue(new SettingColor(255, 140, 0, 255)).build());
+
+    private final Setting<Integer> guessBeamOffset = sgRender.add(new IntSetting.Builder()
+        .name("guess-beam-offset")
+        .description("Shift the guess beam this many blocks sideways so it isn't right on the amethyst (0 = on it).")
+        .defaultValue(3).range(0, 16).sliderRange(0, 16).build());
 
     private final Setting<Integer> outlineAlpha = sgRender.add(new IntSetting.Builder()
         .name("outline-alpha").description("Opacity of the outline (0-255).")
@@ -182,8 +183,6 @@ public class BaseDetector extends Module {
 
     private long lastToastMs = 0;
     private int tickCounter = 0;
-    private int dbgScanned = 0;
-    private double dbgBest = 0;
 
     private static final String[] DECOR = {
         "banner", "lantern", "candle", "flower_pot", "end_rod", "beacon", "enchanting_table"
@@ -271,14 +270,6 @@ public class BaseDetector extends Module {
             WorldChunk chunk = mc.world.getChunkManager().getWorldChunk(p.x, p.z);
             if (chunk != null) scan(chunk);
         }
-
-        if (debug.get() && queue.isEmpty() && dbgScanned > 0) {
-            long guesses = bases.values().stream().filter(Base::guess).count();
-            info("Scanned " + dbgScanned + " chunks, best score " + Math.round(dbgBest * 10) / 10.0
-                + ", flagged " + (bases.size() - guesses) + ", guesses " + guesses);
-            dbgScanned = 0;
-            dbgBest = 0;
-        }
     }
 
     private void scan(WorldChunk chunk) {
@@ -334,9 +325,6 @@ public class BaseDetector extends Module {
             else if (growth >= midGrowth.get()) total += midBonus.get();
             total += neighborBonus.get() * grownNeighbors(cp);
         }
-
-        dbgScanned++;
-        if (total > dbgBest) dbgBest = total;
 
         Base found = null;
         if (score > 0 && total >= minScore.get()) {
@@ -432,6 +420,18 @@ public class BaseDetector extends Module {
             Text.literal("X " + pos.getX() + "  Y " + pos.getY() + "  Z " + pos.getZ()));
     }
 
+    /** Where to draw the beam. Guess beams are nudged sideways (fixed direction per chunk) so they sit near the geode, not on it. */
+    private BlockPos beamPos(ChunkPos cp, Base b) {
+        int off = guessBeamOffset.get();
+        if (!b.guess() || off <= 0) return b.pos();
+        int h = (cp.x * 73856093) ^ (cp.z * 19349663);
+        double ang = ((h >>> 4) & 0xFFFF) / 65536.0 * Math.PI * 2;
+        return new BlockPos(
+            b.pos().getX() + (int) Math.round(Math.cos(ang) * off),
+            b.pos().getY(),
+            b.pos().getZ() + (int) Math.round(Math.sin(ang) * off));
+    }
+
     private Base nearest() {
         if (mc.player == null) return null;
         BlockPos me = mc.player.getBlockPos();
@@ -462,8 +462,9 @@ public class BaseDetector extends Module {
         Color guessFill = new Color(g.r, g.g, g.b, fillAlpha.get());
 
         if (esp.get()) {
-            for (Base b : bases.values()) {
-                BlockPos p = b.pos();
+            for (Map.Entry<ChunkPos, Base> e : bases.entrySet()) {
+                Base b = e.getValue();
+                BlockPos p = beamPos(e.getKey(), b);
                 event.renderer.box(
                     p.getX(), p.getY(), p.getZ(),
                     p.getX() + 1, top, p.getZ() + 1,
@@ -475,9 +476,10 @@ public class BaseDetector extends Module {
 
         Base n = nearest();
         if (tracer.get() && n != null) {
+            BlockPos tp = beamPos(new ChunkPos(n.pos()), n);
             event.renderer.line(
                 RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z,
-                n.pos().getX() + 0.5, n.pos().getY() + 0.5, n.pos().getZ() + 0.5,
+                tp.getX() + 0.5, tp.getY() + 0.5, tp.getZ() + 0.5,
                 n.guess() ? guessLine : baseLine);
         }
     }
