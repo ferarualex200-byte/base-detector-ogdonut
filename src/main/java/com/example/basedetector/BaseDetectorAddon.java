@@ -1,6 +1,7 @@
 package com.example.basedetector;
 import com.example.basedetector.modules.BaseDetector;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
+import com.example.basedetector.modules.MyModule;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 
@@ -10,6 +11,7 @@ public class BaseDetectorAddon extends MeteorAddon {
     @Override
     public void onInitialize() {
         Modules.get().add(new BaseDetector());
+        Modules.get().add(new MyModule());
     }
 
     @Override
