@@ -18,6 +18,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
@@ -118,6 +119,10 @@ public class BaseDetector extends Module {
         .name("rainbow-speed").description("Seconds for one full color cycle.")
         .defaultValue(4.0).min(0.5).sliderMax(20)
         .visible(rainbow::get).build());
+
+    private final Setting<Integer> chunkBoxLift = sgRender.add(new IntSetting.Builder()
+        .name("chunk-box-lift").description("Blocks above the ground surface the chunk box floats, so it doesn't clip into hills.")
+        .defaultValue(1).min(0).sliderMax(10).build());
 
     private final Setting<Integer> chunkBoxHeight = sgRender.add(new IntSetting.Builder()
         .name("chunk-box-height").description("How tall the chunk walls and glow are.")
@@ -429,7 +434,10 @@ public class BaseDetector extends Module {
             ChunkPos cp = new ChunkPos(p); // the chunk the beam is in (shifted away from the amethyst)
 
             double sx = cp.getStartX(), sz = cp.getStartZ();
+            // chunk box sits on the ground (ignoring leaves) at the middle of the chunk
             double y = p.getY();
+            int surf = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, (int) sx + 8, (int) sz + 8);
+            if (surf > mc.world.getBottomY()) y = surf + chunkBoxLift.get();
 
             if (chunkBox.get()) {
                 double h = chunkBoxHeight.get();
