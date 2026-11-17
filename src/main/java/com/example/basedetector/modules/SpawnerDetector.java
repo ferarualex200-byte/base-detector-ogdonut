@@ -12,7 +12,10 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.client.toast.SystemToast;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
@@ -23,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class SpawnerDetector extends Module {
+    // ---------- settings ----------
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgRender = settings.createGroup("Render");
 
@@ -40,6 +44,39 @@ public class SpawnerDetector extends Module {
         .name("toast").description("Show a toast with the coordinates when a new spawner is found.")
         .defaultValue(true).build());
 
+    private final Setting<Boolean> playSound = sgRender.add(new BoolSetting.Builder()
+        .name("play-sound").description("Play a sound when a new spawner is found.")
+        .defaultValue(true).build());
+
+    public enum AlertSound {
+        Pling(SoundEvents.BLOCK_NOTE_BLOCK_PLING.value()),
+        XpOrb(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP),
+        Bell(SoundEvents.BLOCK_BELL_USE);
+
+        public final SoundEvent event;
+        AlertSound(SoundEvent event) { this.event = event; }
+    }
+
+    private final Setting<AlertSound> alertSound = sgRender.add(new EnumSetting.Builder<AlertSound>()
+        .name("sound").description("Which sound to play (changing it previews it).")
+        .defaultValue(AlertSound.Pling)
+        .onChanged(s -> {
+            if (mc.getSoundManager() != null && playSound.get())
+                mc.getSoundManager().play(PositionedSoundInstance.master(
+                    s.event, this.soundPitch.get().floatValue(), this.soundVolume.get().floatValue()));
+        })
+        .visible(playSound::get).build());
+
+    private final Setting<Double> soundVolume = sgRender.add(new DoubleSetting.Builder()
+        .name("sound-volume").description("Volume of the alert sound.")
+        .defaultValue(1.0).range(0.0, 2.0).sliderRange(0.0, 2.0)
+        .visible(playSound::get).build());
+
+    private final Setting<Double> soundPitch = sgRender.add(new DoubleSetting.Builder()
+        .name("sound-pitch").description("Pitch of the alert sound.")
+        .defaultValue(1.0).range(0.5, 2.0).sliderRange(0.5, 2.0)
+        .visible(playSound::get).build());
+
     private final Setting<Double> beamWidth = sgRender.add(new DoubleSetting.Builder()
         .name("beam-width").description("How wide the beam is, in blocks, on each side of the spawner.")
         .defaultValue(1.0).min(0.1).max(5).sliderMax(3).build());
@@ -56,7 +93,10 @@ public class SpawnerDetector extends Module {
         .name("fill-alpha").description("Opacity of the beam sides (0 = outline only).")
         .defaultValue(90).range(0, 255).sliderRange(0, 255).build());
 
+    // ---------- data ----------
+    /** Spawners currently loaded and visible to the renderer. */
     private final Set<BlockPos> spawners = ConcurrentHashMap.newKeySet();
+    /** Spawners we already showed a toast for, so we never repeat it. */
     private final Set<BlockPos> announced = new HashSet<>();
 
     private int tickCounter = 0;
@@ -66,9 +106,10 @@ public class SpawnerDetector extends Module {
             "Finds monster spawners, draws a big red beam and shows a toast with the coordinates.");
     }
 
+    // ---------- lifecycle ----------
     @Override
     public void onActivate() {
-        tickCounter = scanInterval.get();
+        tickCounter = scanInterval.get(); // scan on the next tick
     }
 
     @Override
@@ -86,6 +127,7 @@ public class SpawnerDetector extends Module {
         announced.clear();
     }
 
+    // ---------- scanning ----------
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
@@ -109,9 +151,11 @@ public class SpawnerDetector extends Module {
             }
         }
 
+        // keep the beam list in sync (spawners that were broken or unloaded disappear)
         spawners.retainAll(found);
         spawners.addAll(found);
 
+        // one toast per pass, for the closest brand-new spawner
         BlockPos me = mc.player.getBlockPos();
         BlockPos closest = null;
         int newCount = 0;
@@ -119,6 +163,12 @@ public class SpawnerDetector extends Module {
             if (!announced.add(p)) continue;
             newCount++;
             if (closest == null || p.getSquaredDistance(me) < closest.getSquaredDistance(me)) closest = p;
+        }
+
+        if (closest != null && playSound.get()) {
+            mc.getSoundManager().play(PositionedSoundInstance.master(
+                alertSound.get().event,
+                soundPitch.get().floatValue(), soundVolume.get().floatValue()));
         }
 
         if (closest != null && toast.get()) {
@@ -131,6 +181,7 @@ public class SpawnerDetector extends Module {
         }
     }
 
+    // ---------- rendering ----------
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (mc.world == null || spawners.isEmpty()) return;
