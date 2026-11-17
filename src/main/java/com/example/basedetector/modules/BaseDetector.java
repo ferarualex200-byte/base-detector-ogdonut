@@ -78,7 +78,12 @@ public class BaseDetector extends Module {
     private final Setting<Integer> markerOffset = sgAmethyst.add(new IntSetting.Builder()
         .name("marker-offset")
         .description("Move the beam and the shown chunk this many blocks away from the amethyst.")
-        .defaultValue(20).min(0).sliderMax(64).build());
+        .defaultValue(35).min(0).sliderMax(128).build());
+
+    private final Setting<Integer> mergeRadius = sgAmethyst.add(new IntSetting.Builder()
+        .name("merge-radius")
+        .description("Geodes closer than this many blocks count as one base. Only the strongest one gets a flag.")
+        .defaultValue(96).min(16).sliderMax(400).build());
 
     // ----- render -----
     private final Setting<Boolean> toast = sgRender.add(new BoolSetting.Builder()
@@ -88,10 +93,6 @@ public class BaseDetector extends Module {
     private final Setting<Integer> toastCooldown = sgRender.add(new IntSetting.Builder()
         .name("toast-cooldown-seconds").description("Minimum time between toasts.")
         .defaultValue(3).min(0).sliderMax(30).build());
-
-    private final Setting<Boolean> esp = sgRender.add(new BoolSetting.Builder()
-        .name("column-esp").description("Draw a tall column from each marker up to the sky.")
-        .defaultValue(true).build());
 
     private final Setting<Boolean> chunkBox = sgRender.add(new BoolSetting.Builder()
         .name("chunk-box").description("Draw a square around the flagged chunk.")
@@ -108,6 +109,19 @@ public class BaseDetector extends Module {
     private final Setting<Boolean> chunkGlow = sgRender.add(new BoolSetting.Builder()
         .name("chunk-glow").description("Soft glow around the chunk outline.")
         .defaultValue(true).build());
+
+    private final Setting<Boolean> rainbow = sgRender.add(new BoolSetting.Builder()
+        .name("rainbow").description("Cycle the chunk box, glow, fill and center beam through rainbow colors.")
+        .defaultValue(false).build());
+
+    private final Setting<Double> rainbowSpeed = sgRender.add(new DoubleSetting.Builder()
+        .name("rainbow-speed").description("Seconds for one full color cycle.")
+        .defaultValue(4.0).min(0.5).sliderMax(20)
+        .visible(rainbow::get).build());
+
+    private final Setting<Integer> chunkBoxHeight = sgRender.add(new IntSetting.Builder()
+        .name("chunk-box-height").description("How tall the chunk walls and glow are.")
+        .defaultValue(40).min(1).sliderMax(200).build());
 
     private final Setting<Boolean> centerBeam = sgRender.add(new BoolSetting.Builder()
         .name("center-beam").description("Draw a beam from the middle of the flagged chunk up to the sky.")
@@ -154,7 +168,12 @@ public class BaseDetector extends Module {
         .defaultValue(30).range(0, 255).sliderRange(0, 255).build());
 
     // ---------- data ----------
-    private record Base(BlockPos pos, double growth) {}
+    private record Base(BlockPos pos, BlockPos geode, double growth, int faces) {
+        /** Higher = stronger candidate. Ties are broken by how many faces were seen. */
+        double score() {
+            return growth + faces * 0.0001;
+        }
+    }
 
     private record Amethyst(double growth, int faces, BlockPos center) {}
 
@@ -235,17 +254,38 @@ public class BaseDetector extends Module {
         if (a != null && a.faces() >= minFaces.get()) {
             if (a.growth() >= minGrowth.get()
                 && Math.hypot(a.center().getX(), a.center().getZ()) >= ignoreNearOrigin.get()) {
-                found = new Base(offsetFromGeode(a.center(), cp, markerOffset.get()), a.growth());
+                found = new Base(offsetFromGeode(a.center(), cp, markerOffset.get()),
+                    a.center(), a.growth(), a.faces());
             }
         }
 
-        if (found != null) {
-            boolean isNew = !bases.containsKey(cp);
-            bases.put(cp, found);
-            if (isNew) notifyFound(found);
-        } else {
+        if (found == null) {
             bases.remove(cp);
+            return;
         }
+
+        // only one flag per cluster: if a stronger (or equal, earlier) flag is nearby, skip this one
+        final Base f = found;
+        double r = mergeRadius.get();
+        for (Map.Entry<ChunkPos, Base> e : bases.entrySet()) {
+            if (e.getKey().equals(cp)) continue;
+            if (geodeDist(e.getValue(), f) > r) continue;
+            if (e.getValue().score() >= f.score()) {
+                bases.remove(cp);
+                return;
+            }
+        }
+
+        // this one is the strongest: drop weaker flags around it
+        bases.entrySet().removeIf(e -> !e.getKey().equals(cp) && geodeDist(e.getValue(), f) <= r);
+
+        boolean isNew = !bases.containsKey(cp);
+        bases.put(cp, f);
+        if (isNew) notifyFound(f);
+    }
+
+    private static double geodeDist(Base a, Base b) {
+        return Math.hypot(a.geode().getX() - b.geode().getX(), a.geode().getZ() - b.geode().getZ());
     }
 
     /** Average growth (0..4) of all budding amethyst faces in this chunk, or null if it has none. */
@@ -352,11 +392,19 @@ public class BaseDetector extends Module {
         event.renderer.line(x1, y, z2, x1, y, z1, col);
     }
 
+    /** Four flat vertical walls around a chunk, pushed outward by `grow` blocks. */
+    private void walls(Render3DEvent event, double sx, double sz, double y1, double y2, double grow, Color col) {
+        double x1 = sx - grow, z1 = sz - grow, x2 = sx + 16 + grow, z2 = sz + 16 + grow;
+        event.renderer.box(x1, y1, z1, x2, y2, z1, col, col, ShapeMode.Sides, 0);
+        event.renderer.box(x1, y1, z2, x2, y2, z2, col, col, ShapeMode.Sides, 0);
+        event.renderer.box(x1, y1, z1, x1, y2, z2, col, col, ShapeMode.Sides, 0);
+        event.renderer.box(x2, y1, z1, x2, y2, z2, col, col, ShapeMode.Sides, 0);
+    }
+
     // ---------- rendering ----------
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (mc.world == null) return;
-        double top = mc.world.getBottomY() + mc.world.getHeight();
 
         SettingColor c = color.get();
         Color line = new Color(c.r, c.g, c.b, outlineAlpha.get());
@@ -366,6 +414,16 @@ public class BaseDetector extends Module {
         Color chunkFill = new Color(cf.r, cf.g, cf.b, cf.a);
         Color chunkLine = new Color(chunkLineColor.get());
 
+        int[] rb = null;
+        if (rainbow.get()) {
+            long period = Math.max(500L, (long) (rainbowSpeed.get() * 1000));
+            float hue = (System.currentTimeMillis() % period) / (float) period;
+            int rgb = java.awt.Color.HSBtoRGB(hue, 0.9f, 1f);
+            rb = new int[]{(rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255};
+            chunkFill = new Color(rb[0], rb[1], rb[2], cf.a);
+            chunkLine = new Color(rb[0], rb[1], rb[2], chunkLineColor.get().a);
+        }
+
         for (Map.Entry<ChunkPos, Base> e : bases.entrySet()) {
             BlockPos p = e.getValue().pos();
             ChunkPos cp = new ChunkPos(p); // the chunk the beam is in (shifted away from the amethyst)
@@ -374,27 +432,40 @@ public class BaseDetector extends Module {
             double y = p.getY();
 
             if (chunkBox.get()) {
+                double h = chunkBoxHeight.get();
+                double yl = y + 0.05; // lift lines slightly so they don't z-fight with the fill
+
                 // flat fill, one shade
                 event.renderer.box(sx, y, sz, sx + 16, y, sz + 16, chunkFill, chunkFill, ShapeMode.Sides, 0);
 
                 // faint 4x4 grid
                 if (chunkGrid.get()) {
-                    Color gridCol = new Color(chunkLine.r, chunkLine.g, chunkLine.b, chunkLine.a / 2);
+                    Color gridCol = new Color(chunkLine.r, chunkLine.g, chunkLine.b, Math.max(chunkLine.a / 2, 60));
                     for (int i = 1; i < 4; i++) {
                         double o = i * 4;
-                        event.renderer.line(sx + o, y, sz, sx + o, y, sz + 16, gridCol);
-                        event.renderer.line(sx, y, sz + o, sx + 16, y, sz + o, gridCol);
+                        event.renderer.line(sx + o, yl, sz, sx + o, yl, sz + 16, gridCol);
+                        event.renderer.line(sx, yl, sz + o, sx + 16, yl, sz + o, gridCol);
                     }
                 }
 
-                // soft glow: wider, fainter outlines around the sharp one
+                // soft glow: translucent walls that fade outward
                 if (chunkGlow.get()) {
-                    rect(event, sx, sz, y, 0.3, new Color(chunkLine.r, chunkLine.g, chunkLine.b, chunkLine.a / 10));
-                    rect(event, sx, sz, y, 0.15, new Color(chunkLine.r, chunkLine.g, chunkLine.b, chunkLine.a / 4));
+                    int a = Math.max(chunkLine.a, 120);
+                    double[] offs = {0.0, 0.25, 0.5, 0.8, 1.2};
+                    int[] alphas = {a / 5, a / 7, a / 10, a / 16, a / 28};
+                    for (int i = 0; i < offs.length; i++) {
+                        walls(event, sx, sz, y, y + h, offs[i],
+                            new Color(chunkLine.r, chunkLine.g, chunkLine.b, Math.max(alphas[i], 4)));
+                    }
                 }
 
-                // thin bright outline
-                rect(event, sx, sz, y, 0, chunkLine);
+                // bright outline: bottom, top and the four corner edges
+                rect(event, sx, sz, yl, 0, chunkLine);
+                rect(event, sx, sz, y + h, 0, chunkLine);
+                event.renderer.line(sx, y, sz, sx, y + h, sz, chunkLine);
+                event.renderer.line(sx + 16, y, sz, sx + 16, y + h, sz, chunkLine);
+                event.renderer.line(sx + 16, y, sz + 16, sx + 16, y + h, sz + 16, chunkLine);
+                event.renderer.line(sx, y, sz + 16, sx, y + h, sz + 16, chunkLine);
             }
 
             // beam in the middle of the chunk
@@ -402,18 +473,12 @@ public class BaseDetector extends Module {
                 double hw = centerBeamWidth.get() / 2.0;
                 double mx = sx + 8, mz = sz + 8;
                 SettingColor bc = centerBeamColor.get();
-                Color bLine = new Color(bc.r, bc.g, bc.b, outlineAlpha.get());
-                Color bFill = new Color(bc.r, bc.g, bc.b, fillAlpha.get());
+                int br = rb != null ? rb[0] : bc.r, bg = rb != null ? rb[1] : bc.g, bb = rb != null ? rb[2] : bc.b;
+                Color bLine = new Color(br, bg, bb, outlineAlpha.get());
+                Color bFill = new Color(br, bg, bb, fillAlpha.get());
                 event.renderer.box(mx - hw, beamMinY.get(), mz - hw, mx + hw, beamMaxY.get() + 1, mz + hw, bFill, bLine, ShapeMode.Both, 0);
             }
 
-            // tall column up to the sky
-            if (esp.get()) {
-                event.renderer.box(
-                    p.getX(), p.getY(), p.getZ(),
-                    p.getX() + 1, top, p.getZ() + 1,
-                    fill, line, ShapeMode.Both, 0);
-            }
         }
 
         Base n = nearest();
