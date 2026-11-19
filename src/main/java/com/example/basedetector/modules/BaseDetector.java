@@ -7,7 +7,6 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.render.RenderUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
@@ -78,7 +77,7 @@ public class BaseDetector extends Module {
 
     private final Setting<Integer> markerOffset = sgAmethyst.add(new IntSetting.Builder()
         .name("marker-offset")
-        .description("Move the beam and the shown chunk this many blocks away from the amethyst.")
+        .description("Move the shown chunks this many blocks away from the amethyst.")
         .defaultValue(35).min(0).sliderMax(128).build());
 
     private final Setting<Integer> mergeRadius = sgAmethyst.add(new IntSetting.Builder()
@@ -96,81 +95,32 @@ public class BaseDetector extends Module {
         .defaultValue(3).min(0).sliderMax(30).build());
 
     private final Setting<Boolean> chunkBox = sgRender.add(new BoolSetting.Builder()
-        .name("chunk-box").description("Draw a square around the flagged chunk.")
+        .name("chunk-box").description("Draw the flagged chunk and its 8 neighbors (3x3).")
         .defaultValue(true).build());
-
-    private final Setting<SettingColor> chunkLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("chunk-line-color").description("Color of the thin outline around the flagged chunk.")
-        .defaultValue(new SettingColor(255, 0, 255, 255)).build());
 
     private final Setting<Boolean> chunkGrid = sgRender.add(new BoolSetting.Builder()
         .name("chunk-grid").description("Draw a faint 4x4 grid inside the flagged chunk.")
         .defaultValue(true).build());
 
-    private final Setting<Boolean> chunkGlow = sgRender.add(new BoolSetting.Builder()
-        .name("chunk-glow").description("Soft glow around the chunk outline.")
-        .defaultValue(true).build());
+    public enum ColorMode { Custom, Rainbow }
 
-    private final Setting<Boolean> rainbow = sgRender.add(new BoolSetting.Builder()
-        .name("rainbow").description("Cycle the chunk box, glow, fill and center beam through rainbow colors.")
-        .defaultValue(false).build());
+    private final Setting<ColorMode> colorMode = sgRender.add(new EnumSetting.Builder<ColorMode>()
+        .name("color-mode").description("Use one color you pick, or cycle the chunks through the rainbow.")
+        .defaultValue(ColorMode.Rainbow).build());
+
+    private final Setting<SettingColor> chunkColor = sgRender.add(new ColorSetting.Builder()
+        .name("chunk-color").description("Color of the 3x3 chunks (fill, borders and grid).")
+        .defaultValue(new SettingColor(255, 0, 255, 255))
+        .visible(() -> colorMode.get() == ColorMode.Custom).build());
 
     private final Setting<Double> rainbowSpeed = sgRender.add(new DoubleSetting.Builder()
         .name("rainbow-speed").description("Seconds for one full color cycle.")
         .defaultValue(4.0).min(0.5).sliderMax(20)
-        .visible(rainbow::get).build());
+        .visible(() -> colorMode.get() == ColorMode.Rainbow).build());
 
     private final Setting<Integer> chunkBoxLift = sgRender.add(new IntSetting.Builder()
         .name("chunk-box-lift").description("Blocks above the ground surface the chunk box floats, so it doesn't clip into hills.")
         .defaultValue(1).min(0).sliderMax(10).build());
-
-    private final Setting<Integer> chunkBoxHeight = sgRender.add(new IntSetting.Builder()
-        .name("chunk-box-height").description("How tall the chunk walls and glow are.")
-        .defaultValue(40).min(1).sliderMax(200).build());
-
-    private final Setting<Boolean> centerBeam = sgRender.add(new BoolSetting.Builder()
-        .name("center-beam").description("Draw a beam from the middle of the flagged chunk up to the sky.")
-        .defaultValue(true).build());
-
-    private final Setting<Integer> beamMinY = sgRender.add(new IntSetting.Builder()
-        .name("beam-min-y").description("Lowest Y the center beam reaches (-64 = bottom of deepslate).")
-        .defaultValue(-64).range(-64, 320).sliderRange(-64, 320)
-        .visible(centerBeam::get).build());
-
-    private final Setting<Integer> beamMaxY = sgRender.add(new IntSetting.Builder()
-        .name("beam-max-y").description("Highest Y the center beam reaches.")
-        .defaultValue(200).range(-64, 320).sliderRange(-64, 320)
-        .visible(centerBeam::get).build());
-
-    private final Setting<Double> centerBeamWidth = sgRender.add(new DoubleSetting.Builder()
-        .name("center-beam-width").description("Width of the center beam in blocks.")
-        .defaultValue(1.0).min(0.1).max(5).sliderMax(3)
-        .visible(centerBeam::get).build());
-
-    private final Setting<SettingColor> centerBeamColor = sgRender.add(new ColorSetting.Builder()
-        .name("center-beam-color").description("Color of the center beam.")
-        .defaultValue(new SettingColor(255, 0, 255, 255))
-        .visible(centerBeam::get).build());
-
-    private final Setting<SettingColor> chunkFillColor = sgRender.add(new ColorSetting.Builder()
-        .name("chunk-fill-color").description("Color that fills the whole flagged chunk (one flat shade).")
-        .defaultValue(new SettingColor(128, 0, 128, 110)).build());
-
-    private final Setting<Boolean> tracer = sgRender.add(new BoolSetting.Builder()
-        .name("tracer").description("Draw a line to the nearest marker.")
-        .defaultValue(true).build());
-
-    private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder()
-        .name("color").description("Color of the column and tracer (and the chunk outline if rainbow is off).")
-        .defaultValue(new SettingColor(0, 0, 0, 255)).build());
-
-    private final Setting<Integer> outlineAlpha = sgRender.add(new IntSetting.Builder()
-        .name("outline-alpha").description("Opacity of the outline (0-255).")
-        .defaultValue(255).range(0, 255).sliderRange(0, 255).build());
-
-    private final Setting<Integer> fillAlpha = sgRender.add(new IntSetting.Builder()
-        .name("fill-alpha").description("Opacity of the filled sides of the column (0 = outline only).")
-        .defaultValue(30).range(0, 255).sliderRange(0, 255).build());
 
     // ---------- data ----------
     private record Base(BlockPos pos, BlockPos geode, double growth, int faces) {
@@ -370,22 +320,7 @@ public class BaseDetector extends Module {
         BlockPos pos = b.pos();
         SystemToast.add(mc.getToastManager(), SystemToast.Type.PERIODIC_NOTIFICATION,
             Text.literal("Base Detected"),
-            Text.literal("X " + pos.getX() + "  Y " + pos.getY() + "  Z " + pos.getZ()));
-    }
-
-    private Base nearest() {
-        if (mc.player == null) return null;
-        BlockPos me = mc.player.getBlockPos();
-        Base best = null;
-        double bestD = Double.MAX_VALUE;
-        for (Base b : bases.values()) {
-            double d = b.pos().getSquaredDistance(me);
-            if (d < bestD) {
-                bestD = d;
-                best = b;
-            }
-        }
-        return best;
+            Text.literal("X " + pos.getX() + "  Z " + pos.getZ()));
     }
 
     /** Square outline of a chunk at height y, grown outward by `grow` blocks on every side. */
@@ -397,104 +332,70 @@ public class BaseDetector extends Module {
         event.renderer.line(x1, y, z2, x1, y, z1, col);
     }
 
-    /** Four flat vertical walls around a chunk, pushed outward by `grow` blocks. */
-    private void walls(Render3DEvent event, double sx, double sz, double y1, double y2, double grow, Color col) {
-        double x1 = sx - grow, z1 = sz - grow, x2 = sx + 16 + grow, z2 = sz + 16 + grow;
-        event.renderer.box(x1, y1, z1, x2, y2, z1, col, col, ShapeMode.Sides, 0);
-        event.renderer.box(x1, y1, z2, x2, y2, z2, col, col, ShapeMode.Sides, 0);
-        event.renderer.box(x1, y1, z1, x1, y2, z2, col, col, ShapeMode.Sides, 0);
-        event.renderer.box(x2, y1, z1, x2, y2, z2, col, col, ShapeMode.Sides, 0);
-    }
-
     // ---------- rendering ----------
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (mc.world == null) return;
 
-        SettingColor c = color.get();
-        Color line = new Color(c.r, c.g, c.b, outlineAlpha.get());
-        Color fill = new Color(c.r, c.g, c.b, fillAlpha.get());
-
-        SettingColor cf = chunkFillColor.get();
-        Color chunkFill = new Color(cf.r, cf.g, cf.b, cf.a);
-        Color chunkLine = new Color(chunkLineColor.get());
-
-        int[] rb = null;
-        if (rainbow.get()) {
+        int cr, cg, cb;
+        if (colorMode.get() == ColorMode.Rainbow) {
             long period = Math.max(500L, (long) (rainbowSpeed.get() * 1000));
             float hue = (System.currentTimeMillis() % period) / (float) period;
             int rgb = java.awt.Color.HSBtoRGB(hue, 0.9f, 1f);
-            rb = new int[]{(rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255};
-            chunkFill = new Color(rb[0], rb[1], rb[2], cf.a);
-            chunkLine = new Color(rb[0], rb[1], rb[2], chunkLineColor.get().a);
+            cr = (rgb >> 16) & 255;
+            cg = (rgb >> 8) & 255;
+            cb = rgb & 255;
+        } else {
+            SettingColor cc = chunkColor.get();
+            cr = cc.r;
+            cg = cc.g;
+            cb = cc.b;
         }
+        Color chunkFill = new Color(cr, cg, cb, 110);
+        Color chunkLine = new Color(cr, cg, cb, 255);
 
         for (Map.Entry<ChunkPos, Base> e : bases.entrySet()) {
             BlockPos p = e.getValue().pos();
-            ChunkPos cp = new ChunkPos(p); // the chunk the beam is in (shifted away from the amethyst)
+            ChunkPos cp = new ChunkPos(p); // the flagged chunk (shifted away from the amethyst)
 
-            double sx = cp.getStartX(), sz = cp.getStartZ();
-            // chunk box sits on the ground (ignoring leaves) at the middle of the chunk
+            double cx = cp.getStartX(), cz = cp.getStartZ();
+            // whole 3x3 block sits flat on the ground (ignoring leaves) at the flagged chunk
             double y = p.getY();
-            int surf = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, (int) sx + 8, (int) sz + 8);
+            int surf = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, (int) cx + 8, (int) cz + 8);
             if (surf > mc.world.getBottomY()) y = surf + chunkBoxLift.get();
+            double yl = y + 0.05; // lines slightly above the fill so they don't z-fight
 
-            if (chunkBox.get()) {
-                double h = chunkBoxHeight.get();
-                double yl = y + 0.05; // lift lines slightly so they don't z-fight with the fill
+            if (!chunkBox.get()) continue;
 
-                // flat fill, one shade
-                event.renderer.box(sx, y, sz, sx + 16, y, sz + 16, chunkFill, chunkFill, ShapeMode.Sides, 0);
+            Color neighborFill = new Color(chunkFill.r, chunkFill.g, chunkFill.b, Math.max(chunkFill.a / 2, 20));
+            Color bright = new Color((chunkLine.r + 255) / 2, (chunkLine.g + 255) / 2, (chunkLine.b + 255) / 2, 255);
 
-                // faint 4x4 grid
-                if (chunkGrid.get()) {
-                    Color gridCol = new Color(chunkLine.r, chunkLine.g, chunkLine.b, Math.max(chunkLine.a / 2, 60));
-                    for (int i = 1; i < 4; i++) {
-                        double o = i * 4;
-                        event.renderer.line(sx + o, yl, sz, sx + o, yl, sz + 16, gridCol);
-                        event.renderer.line(sx, yl, sz + o, sx + 16, yl, sz + o, gridCol);
-                    }
+            // 3x3 chunks: fill + border for each
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    double sx = cx + dx * 16, sz = cz + dz * 16;
+                    boolean mid = dx == 0 && dz == 0;
+                    Color f = mid ? chunkFill : neighborFill;
+                    event.renderer.box(sx, y, sz, sx + 16, y, sz + 16, f, f, ShapeMode.Sides, 0);
+                    rect(event, sx, sz, yl, 0, chunkLine);
                 }
-
-                // soft glow: translucent walls that fade outward
-                if (chunkGlow.get()) {
-                    int a = Math.max(chunkLine.a, 120);
-                    double[] offs = {0.0, 0.25, 0.5, 0.8, 1.2};
-                    int[] alphas = {a / 5, a / 7, a / 10, a / 16, a / 28};
-                    for (int i = 0; i < offs.length; i++) {
-                        walls(event, sx, sz, y, y + h, offs[i],
-                            new Color(chunkLine.r, chunkLine.g, chunkLine.b, Math.max(alphas[i], 4)));
-                    }
-                }
-
-                // bright outline: bottom, top and the four corner edges
-                rect(event, sx, sz, yl, 0, chunkLine);
-                rect(event, sx, sz, y + h, 0, chunkLine);
-                event.renderer.line(sx, y, sz, sx, y + h, sz, chunkLine);
-                event.renderer.line(sx + 16, y, sz, sx + 16, y + h, sz, chunkLine);
-                event.renderer.line(sx + 16, y, sz + 16, sx + 16, y + h, sz + 16, chunkLine);
-                event.renderer.line(sx, y, sz + 16, sx, y + h, sz + 16, chunkLine);
             }
 
-            // beam in the middle of the chunk
-            if (centerBeam.get()) {
-                double hw = centerBeamWidth.get() / 2.0;
-                double mx = sx + 8, mz = sz + 8;
-                SettingColor bc = centerBeamColor.get();
-                int br = rb != null ? rb[0] : bc.r, bg = rb != null ? rb[1] : bc.g, bb = rb != null ? rb[2] : bc.b;
-                Color bLine = new Color(br, bg, bb, outlineAlpha.get());
-                Color bFill = new Color(br, bg, bb, fillAlpha.get());
-                event.renderer.box(mx - hw, beamMinY.get(), mz - hw, mx + hw, beamMaxY.get() + 1, mz + hw, bFill, bLine, ShapeMode.Both, 0);
+            // faint 4x4 grid, flagged chunk only
+            if (chunkGrid.get()) {
+                Color gridCol = new Color(chunkLine.r, chunkLine.g, chunkLine.b, Math.max(chunkLine.a / 2, 60));
+                for (int i = 1; i < 4; i++) {
+                    double o = i * 4;
+                    event.renderer.line(cx + o, yl, cz, cx + o, yl, cz + 16, gridCol);
+                    event.renderer.line(cx, yl, cz + o, cx + 16, yl, cz + o, gridCol);
+                }
             }
 
+            // brighter border on the flagged chunk (two passes so it reads thicker)
+            rect(event, cx, cz, yl, 0, bright);
+            rect(event, cx, cz, yl + 0.02, 0.05, bright);
         }
 
-        Base n = nearest();
-        if (tracer.get() && n != null) {
-            event.renderer.line(
-                RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z,
-                n.pos().getX() + 0.5, n.pos().getY() + 0.5, n.pos().getZ() + 0.5, line);
-        }
     }
 
     @Override
