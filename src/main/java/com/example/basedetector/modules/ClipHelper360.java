@@ -1,27 +1,31 @@
 package com.example.basedetector.modules;
 
 import com.example.basedetector.BaseDetectorAddon;
-import meteordevelopment.meteorclient.settings.*;
+import meteordevelopment.meteorclient.settings.Setting;
+import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.render.Xray;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.registry.Registries;
 
 import java.util.*;
 
 public class ClipHelper360 extends Module {
-    // Every block that can show up in caves. Only these appear in the block picker.
+    // Natural terrain, ores, liquids and cave-only blocks get hidden.
+    // Anything players build or decorate with is NOT in this list.
     private static final Set<Block> CAVE_BLOCKS = new LinkedHashSet<>(Arrays.asList(
-        // Stone and terrain
-        Blocks.STONE, Blocks.DEEPSLATE, Blocks.COBBLED_DEEPSLATE, Blocks.TUFF,
-        Blocks.ANDESITE, Blocks.DIORITE, Blocks.GRANITE, Blocks.DIRT,
-        Blocks.COARSE_DIRT, Blocks.ROOTED_DIRT, Blocks.GRAVEL, Blocks.SAND,
-        Blocks.SANDSTONE, Blocks.CLAY, Blocks.MUD, Blocks.CALCITE,
-        Blocks.SMOOTH_BASALT, Blocks.BASALT, Blocks.OBSIDIAN, Blocks.MAGMA_BLOCK,
-        Blocks.COBBLESTONE, Blocks.MOSSY_COBBLESTONE, Blocks.SPAWNER,
+        // Natural stone and terrain
+        Blocks.STONE, Blocks.DEEPSLATE, Blocks.TUFF,
+        Blocks.ANDESITE, Blocks.DIORITE, Blocks.GRANITE,
+        Blocks.DIRT, Blocks.COARSE_DIRT, Blocks.ROOTED_DIRT, Blocks.GRASS_BLOCK,
+        Blocks.GRAVEL, Blocks.SAND, Blocks.RED_SAND, Blocks.CLAY, Blocks.MUD,
+        Blocks.MAGMA_BLOCK, Blocks.BEDROCK,
         Blocks.INFESTED_STONE, Blocks.INFESTED_DEEPSLATE,
-        Blocks.SNOW_BLOCK, Blocks.POWDER_SNOW, Blocks.ICE, Blocks.PACKED_ICE,
+
+        // Liquids
+        Blocks.WATER, Blocks.LAVA,
 
         // Ores
         Blocks.COAL_ORE, Blocks.DEEPSLATE_COAL_ORE,
@@ -33,67 +37,33 @@ public class ClipHelper360 extends Module {
         Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE,
         Blocks.EMERALD_ORE, Blocks.DEEPSLATE_EMERALD_ORE,
 
-        // Dripstone caves
+        // Cave-only features
         Blocks.DRIPSTONE_BLOCK, Blocks.POINTED_DRIPSTONE,
+        Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT, Blocks.HANGING_ROOTS,
+        Blocks.SCULK, Blocks.SCULK_VEIN, Blocks.REINFORCED_DEEPSLATE,
 
-        // Lush caves
-        Blocks.MOSS_BLOCK, Blocks.MOSS_CARPET, Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT,
-        Blocks.GLOW_LICHEN, Blocks.AZALEA, Blocks.FLOWERING_AZALEA,
-        Blocks.BIG_DRIPLEAF, Blocks.BIG_DRIPLEAF_STEM, Blocks.SMALL_DRIPLEAF,
-        Blocks.SPORE_BLOSSOM, Blocks.HANGING_ROOTS,
-
-        // Amethyst geodes
-        Blocks.AMETHYST_BLOCK, Blocks.BUDDING_AMETHYST, Blocks.AMETHYST_CLUSTER,
-        Blocks.LARGE_AMETHYST_BUD, Blocks.MEDIUM_AMETHYST_BUD, Blocks.SMALL_AMETHYST_BUD,
-
-        // Deep dark
-        Blocks.SCULK, Blocks.SCULK_VEIN, Blocks.SCULK_CATALYST,
-        Blocks.SCULK_SHRIEKER, Blocks.SCULK_SENSOR, Blocks.CALIBRATED_SCULK_SENSOR,
-
-        // Mineshafts
-        Blocks.COBWEB, Blocks.OAK_PLANKS, Blocks.OAK_FENCE, Blocks.RAIL,
-        Blocks.TORCH, Blocks.WALL_TORCH,
-
-        // Nether
-        Blocks.NETHERRACK, Blocks.BLACKSTONE, Blocks.SOUL_SAND, Blocks.SOUL_SOIL,
-        Blocks.GLOWSTONE, Blocks.NETHER_QUARTZ_ORE, Blocks.NETHER_GOLD_ORE,
-        Blocks.ANCIENT_DEBRIS,
-
-        // End
-        Blocks.END_STONE
+        // Nether natural
+        Blocks.NETHERRACK, Blocks.NETHER_QUARTZ_ORE, Blocks.NETHER_GOLD_ORE,
+        Blocks.ANCIENT_DEBRIS
     ));
 
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
-
-    private final Setting<List<Block>> blocks = sgGeneral.add(new BlockListSetting.Builder()
-        .name("blocks")
-        .description("Cave blocks to hide while the module is on.")
-        .defaultValue(new ArrayList<>(CAVE_BLOCKS))
-        .filter(CAVE_BLOCKS::contains)
-        .build()
-    );
-
     private boolean wasXrayOn;
-    private Object oldMode, oldBlocks, oldOpacity;
+    private Object oldBlocks, oldOpacity;
 
     public ClipHelper360() {
         super(BaseDetectorAddon.CATEGORY, "360-clip-helper", "Hides caves and natural terrain so they don't ruin your 360 clips.");
     }
 
-    // Finds an enum value by name (e.g. "blacklist") without needing the exact enum class.
-    private Object findEnum(Object current, String name) {
-        if (!(current instanceof Enum<?> e)) return null;
-        for (Object c : e.getDeclaringClass().getEnumConstants()) {
-            if (((Enum<?>) c).name().equalsIgnoreCase(name)) return c;
-        }
-        return null;
+    private Setting<?> getListSetting(Xray xray) {
+        Setting<?> s = xray.settings.get("whitelist");
+        if (s == null) s = xray.settings.get("blocks"); // very old versions
+        return s;
     }
 
-    // Newer Meteor versions call the list "blacklist", older ones call it "blocks".
-    private Setting<?> getListSetting(Xray xray) {
-        Setting<?> s = xray.settings.get("blacklist");
-        if (s == null) s = xray.settings.get("blocks");
-        return s;
+    private String dumpNames(Xray xray) {
+        StringBuilder sb = new StringBuilder();
+        for (SettingGroup g : xray.settings) for (Setting<?> s : g) sb.append(s.name).append(", ");
+        return sb.toString();
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -102,26 +72,29 @@ public class ClipHelper360 extends Module {
         Xray xray = Modules.get().get(Xray.class);
         wasXrayOn = xray.isActive();
 
-        Setting mode = xray.settings.get("list-mode");
         Setting list = getListSetting(xray);
         Setting opacity = xray.settings.get("opacity");
 
-        if (mode == null || list == null || opacity == null) {
-            error("Couldn't find Xray's settings (list-mode / blacklist / opacity). Check your Meteor version.");
+        if (list == null || opacity == null) {
+            error("Couldn't find Xray's settings. Found: " + dumpNames(xray));
             toggle();
             return;
         }
 
-        oldMode = mode.get();
         oldBlocks = new ArrayList<>((List<Block>) list.get());
         oldOpacity = opacity.get();
 
-        Object blacklist = findEnum(oldMode, "blacklist");
-        if (blacklist != null) mode.set(blacklist);
-        list.set(new ArrayList<>(blocks.get()));
+        // Xray only has a whitelist (blocks that stay visible),
+        // so whitelist everything EXCEPT the cave blocks.
+        List<Block> visible = new ArrayList<>();
+        for (Block b : Registries.BLOCK) {
+            if (b == Blocks.AIR) continue;
+            if (!CAVE_BLOCKS.contains(b)) visible.add(b);
+        }
+        list.set(visible);
         opacity.set(0);
 
-        if (wasXrayOn) xray.toggle(); // re-toggle so it reloads with the new settings
+        if (wasXrayOn) xray.toggle(); // reload with the new settings
         xray.toggle();
     }
 
@@ -132,13 +105,10 @@ public class ClipHelper360 extends Module {
 
         if (xray.isActive()) xray.toggle();
 
-        Setting mode = xray.settings.get("list-mode");
         Setting list = getListSetting(xray);
         Setting opacity = xray.settings.get("opacity");
+        if (list == null || opacity == null || oldBlocks == null) return;
 
-        if (mode == null || list == null || opacity == null || oldMode == null) return;
-
-        mode.set(oldMode);
         list.set(oldBlocks);
         opacity.set(oldOpacity);
 
