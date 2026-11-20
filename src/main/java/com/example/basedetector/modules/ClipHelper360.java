@@ -80,6 +80,15 @@ public class ClipHelper360 extends Module {
         super(BaseDetectorAddon.CATEGORY, "360-clip-helper", "Hides caves and natural terrain so they don't ruin your 360 clips.");
     }
 
+    // Finds an enum value by name (e.g. "blacklist") without needing the exact enum class.
+    private Object findEnum(Object current, String name) {
+        if (!(current instanceof Enum<?> e)) return null;
+        for (Object c : e.getDeclaringClass().getEnumConstants()) {
+            if (((Enum<?>) c).name().equalsIgnoreCase(name)) return c;
+        }
+        return null;
+    }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     @Override
     public void onActivate() {
@@ -94,7 +103,8 @@ public class ClipHelper360 extends Module {
         oldBlocks = new ArrayList<>((List<Block>) list.get());
         oldOpacity = opacity.get();
 
-        mode.set(Xray.ListMode.Blacklist);
+        Object blacklist = findEnum(oldMode, "blacklist");
+        if (blacklist != null) mode.set(blacklist);
         list.set(new ArrayList<>(blocks.get()));
         opacity.set(0);
 
@@ -109,9 +119,13 @@ public class ClipHelper360 extends Module {
 
         if (xray.isActive()) xray.toggle();
 
-        xray.settings.get("list-mode").set(oldMode);
-        xray.settings.get("blocks").set(oldBlocks);
-        xray.settings.get("opacity").set(oldOpacity);
+        Setting mode = xray.settings.get("list-mode");
+        Setting list = xray.settings.get("blocks");
+        Setting opacity = xray.settings.get("opacity");
+
+        mode.set(oldMode);
+        list.set(oldBlocks);
+        opacity.set(oldOpacity);
 
         if (wasXrayOn) xray.toggle();
     }
