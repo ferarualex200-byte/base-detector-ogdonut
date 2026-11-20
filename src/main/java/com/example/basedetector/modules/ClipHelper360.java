@@ -89,6 +89,13 @@ public class ClipHelper360 extends Module {
         return null;
     }
 
+    // Newer Meteor versions call the list "blacklist", older ones call it "blocks".
+    private Setting<?> getListSetting(Xray xray) {
+        Setting<?> s = xray.settings.get("blacklist");
+        if (s == null) s = xray.settings.get("blocks");
+        return s;
+    }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     @Override
     public void onActivate() {
@@ -96,8 +103,14 @@ public class ClipHelper360 extends Module {
         wasXrayOn = xray.isActive();
 
         Setting mode = xray.settings.get("list-mode");
-        Setting list = xray.settings.get("blocks");
+        Setting list = getListSetting(xray);
         Setting opacity = xray.settings.get("opacity");
+
+        if (mode == null || list == null || opacity == null) {
+            error("Couldn't find Xray's settings (list-mode / blacklist / opacity). Check your Meteor version.");
+            toggle();
+            return;
+        }
 
         oldMode = mode.get();
         oldBlocks = new ArrayList<>((List<Block>) list.get());
@@ -120,8 +133,10 @@ public class ClipHelper360 extends Module {
         if (xray.isActive()) xray.toggle();
 
         Setting mode = xray.settings.get("list-mode");
-        Setting list = xray.settings.get("blocks");
+        Setting list = getListSetting(xray);
         Setting opacity = xray.settings.get("opacity");
+
+        if (mode == null || list == null || opacity == null || oldMode == null) return;
 
         mode.set(oldMode);
         list.set(oldBlocks);
