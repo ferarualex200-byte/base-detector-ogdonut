@@ -17,7 +17,6 @@ import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
-import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
@@ -95,8 +94,12 @@ public class BaseDetector extends Module {
         .defaultValue(3).min(0).sliderMax(30).build());
 
     private final Setting<Boolean> chunkBox = sgRender.add(new BoolSetting.Builder()
-        .name("chunk-box").description("Draw the 3x3 block of chunks around the flagged chunk.")
+        .name("chunk-box").description("Draw the 4x4 block of chunks around the flag point.")
         .defaultValue(true).build());
+
+    private final Setting<Integer> chunkY = sgRender.add(new IntSetting.Builder()
+        .name("chunk-y").description("The Y level all 16 chunks are drawn at.")
+        .defaultValue(50).range(-64, 320).sliderRange(-64, 320).build());
 
     private final Setting<SettingColor> chunkLineColor = sgRender.add(new ColorSetting.Builder()
         .name("chunk-line-color").description("Color of the thin outline around each chunk.")
@@ -118,10 +121,6 @@ public class BaseDetector extends Module {
         .name("rainbow-speed").description("Seconds for one full color cycle.")
         .defaultValue(4.0).min(0.5).sliderMax(20)
         .visible(rainbow::get).build());
-
-    private final Setting<Integer> chunkBoxLift = sgRender.add(new IntSetting.Builder()
-        .name("chunk-box-lift").description("Blocks above the ground surface the chunk boxes float, so they don't clip into hills.")
-        .defaultValue(1).min(0).sliderMax(10).build());
 
     private final Setting<Integer> chunkBoxHeight = sgRender.add(new IntSetting.Builder()
         .name("chunk-box-height").description("How tall the chunk walls and glow are.")
@@ -350,15 +349,11 @@ public class BaseDetector extends Module {
         event.renderer.box(x2, y1, z1, x2, y2, z2, col, col, ShapeMode.Sides, 0);
     }
 
-    /** Draws one chunk: flat fill, 4x4 grid, soft glow and bright outline. */
-    private void renderChunk(Render3DEvent event, int chunkX, int chunkZ, double fallbackY, Color chunkFill, Color chunkLine) {
+    /** Draws one chunk at the flat chunk-y level: fill, 4x4 grid, soft glow and bright outline. */
+    private void renderChunk(Render3DEvent event, int chunkX, int chunkZ, Color chunkFill, Color chunkLine) {
         double sx = chunkX * 16.0, sz = chunkZ * 16.0;
 
-        // chunk box sits on the ground (ignoring leaves) at the middle of the chunk
-        double y = fallbackY;
-        int surf = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, (int) sx + 8, (int) sz + 8);
-        if (surf > mc.world.getBottomY()) y = surf + chunkBoxLift.get();
-
+        double y = chunkY.get();
         double h = chunkBoxHeight.get();
         double yl = y + 0.05; // lift lines slightly so they don't z-fight with the fill
 
@@ -416,12 +411,15 @@ public class BaseDetector extends Module {
 
         for (Map.Entry<ChunkPos, Base> e : bases.entrySet()) {
             BlockPos p = e.getValue().pos();
-            ChunkPos cp = new ChunkPos(p); // the middle chunk (shifted away from the amethyst)
 
-            // 3x3 block of chunks around the middle one
-            for (int dx = -1; dx <= 1; dx++)
-                for (int dz = -1; dz <= 1; dz++)
-                    renderChunk(event, cp.x + dx, cp.z + dz, p.getY(), chunkFill, chunkLine);
+            // chunk corner nearest the flag point; the 4x4 block is centered on it
+            int cornerX = (int) Math.round(p.getX() / 16.0);
+            int cornerZ = (int) Math.round(p.getZ() / 16.0);
+
+            // 4x4 block of chunks: 2 chunks on each side of the corner, all at the same Y
+            for (int dx = -2; dx <= 1; dx++)
+                for (int dz = -2; dz <= 1; dz++)
+                    renderChunk(event, cornerX + dx, cornerZ + dz, chunkFill, chunkLine);
         }
     }
 
