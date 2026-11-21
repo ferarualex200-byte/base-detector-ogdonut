@@ -12,7 +12,6 @@ public class BaseDetectorAddon extends MeteorAddon {
     public void onInitialize() {
         Modules.get().add(new BaseDetector());
         Modules.get().add(new SpawnerDetector());
-        Modules.get().add(new ClipHelper360());
     }
 
     @Override
